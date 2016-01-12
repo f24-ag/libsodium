@@ -169,15 +169,15 @@ AS_CASE([$host_os], [cygwin*|mingw*|msys|pw32*|cegcc*], [ ], [
   ])
 ])
 
-AS_IF([test "$enable_pie" != "no"],[
-  AX_CHECK_COMPILE_FLAG([-fPIE], [
-    AX_CHECK_LINK_FLAG([-fPIE],
-      [AX_CHECK_LINK_FLAG([-pie],
-        [CFLAGS="$CFLAGS -fPIE"
-         LDFLAGS="$LDFLAGS -pie"])
-    ])
-  ])
-])
+#AS_IF([test "$enable_pie" != "no"],[
+#  AX_CHECK_COMPILE_FLAG([-fPIE], [
+#    AX_CHECK_LINK_FLAG([-fPIE],
+#      [AX_CHECK_LINK_FLAG([-pie],
+#        [CFLAGS="$CFLAGS -fPIE"
+#         LDFLAGS="$LDFLAGS -pie"])
+#    ])
+#  ])
+#])
 
 AX_CHECK_COMPILE_FLAG([-fno-strict-aliasing], [CFLAGS="$CFLAGS -fno-strict-aliasing"])
 AX_CHECK_COMPILE_FLAG([-fno-strict-overflow], [CFLAGS="$CFLAGS -fno-strict-overflow"], [
