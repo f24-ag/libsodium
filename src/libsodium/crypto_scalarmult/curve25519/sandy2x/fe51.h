@@ -12,14 +12,12 @@
 extern "C" {
 #endif
 
-#include <stdint.h>
-#include <stdlib.h>
-
+#include "crypto_uint64.h"
 #include "fe51_namespace.h"
 
-typedef struct
+typedef struct 
 {
-    uint64_t v[5];
+  crypto_uint64 v[5]; 
 }
 fe51;
 

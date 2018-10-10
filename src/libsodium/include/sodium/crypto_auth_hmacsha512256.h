@@ -6,7 +6,7 @@
 #include "export.h"
 
 #ifdef __cplusplus
-# ifdef __GNUC__
+# if __GNUC__
 #  pragma GCC diagnostic ignored "-Wlong-long"
 # endif
 extern "C" {
@@ -34,7 +34,6 @@ int crypto_auth_hmacsha512256_verify(const unsigned char *h,
 /* ------------------------------------------------------------------------- */
 
 typedef crypto_auth_hmacsha512_state crypto_auth_hmacsha512256_state;
-
 SODIUM_EXPORT
 size_t crypto_auth_hmacsha512256_statebytes(void);
 
@@ -51,9 +50,6 @@ int crypto_auth_hmacsha512256_update(crypto_auth_hmacsha512256_state *state,
 SODIUM_EXPORT
 int crypto_auth_hmacsha512256_final(crypto_auth_hmacsha512256_state *state,
                                     unsigned char *out);
-
-SODIUM_EXPORT
-void crypto_auth_hmacsha512256_keygen(unsigned char k[crypto_auth_hmacsha512256_KEYBYTES]);
 
 #ifdef __cplusplus
 }

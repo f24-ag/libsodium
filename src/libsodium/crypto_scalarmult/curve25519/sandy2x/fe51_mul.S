@@ -7,18 +7,10 @@
 #include "consts_namespace.h"
 .text
 .p2align 5
-#ifdef ASM_HIDE_SYMBOL
-ASM_HIDE_SYMBOL fe51_mul
-ASM_HIDE_SYMBOL _fe51_mul
-#endif
-.globl fe51_mul
 .globl _fe51_mul
-#ifdef __ELF__
-.type fe51_mul, @function
-.type _fe51_mul, @function
-#endif
-fe51_mul:
+.globl fe51_mul
 _fe51_mul:
+fe51_mul:
 mov %rsp,%r11
 and $31,%r11
 add $96,%r11

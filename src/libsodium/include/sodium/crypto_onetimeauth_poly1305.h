@@ -1,27 +1,24 @@
 #ifndef crypto_onetimeauth_poly1305_H
 #define crypto_onetimeauth_poly1305_H
 
+#include <stdlib.h>
+#include "export.h"
+
 #ifdef __cplusplus
-# ifdef __GNUC__
+# if __GNUC__
 #  pragma GCC diagnostic ignored "-Wlong-long"
 # endif
 extern "C" {
 #endif
 
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-
 #include <sys/types.h>
 
-#include "export.h"
+#include <stdint.h>
+#include <stdio.h>
 
-typedef struct CRYPTO_ALIGN(16) crypto_onetimeauth_poly1305_state {
+typedef CRYPTO_ALIGN(16) struct crypto_onetimeauth_poly1305_state {
     unsigned char opaque[256];
 } crypto_onetimeauth_poly1305_state;
-
-SODIUM_EXPORT
-size_t crypto_onetimeauth_poly1305_statebytes(void);
 
 #define crypto_onetimeauth_poly1305_BYTES 16U
 SODIUM_EXPORT
@@ -57,8 +54,9 @@ SODIUM_EXPORT
 int crypto_onetimeauth_poly1305_final(crypto_onetimeauth_poly1305_state *state,
                                       unsigned char *out);
 
-SODIUM_EXPORT
-void crypto_onetimeauth_poly1305_keygen(unsigned char k[crypto_onetimeauth_poly1305_KEYBYTES]);
+/* ------------------------------------------------------------------------- */
+
+int _crypto_onetimeauth_poly1305_pick_best_implementation(void);
 
 #ifdef __cplusplus
 }

@@ -8,10 +8,6 @@
 #include "consts_namespace.h"
 .p2align 5
 
-#ifdef ASM_HIDE_SYMBOL
-ASM_HIDE_SYMBOL fe51_pack
-ASM_HIDE_SYMBOL _fe51_pack
-#endif
 .globl fe51_pack
 .globl _fe51_pack
 #ifdef __ELF__
@@ -35,8 +31,6 @@ movq   32(%rsi),%rsi
 movq REDMASK51(%rip),%rax
 lea  -18(%rax),%r10
 mov  $3,%r11
-
-.p2align 4
 ._reduceloop:
 mov  %rdx,%r12
 shr  $51,%r12
@@ -61,7 +55,6 @@ imulq  $19, %r12,%r12
 add  %r12,%rdx
 sub  $1,%r11
 ja ._reduceloop
-
 mov  $1,%r12
 cmp  %r10,%rdx
 cmovl %r11,%r12

@@ -4,9 +4,8 @@
 #include <stdlib.h>
 
 #ifdef __native_client__
-# include <irt.h>
+# include <nacl/nacl_random.h>
 
-# include "core.h"
 # include "utils.h"
 # include "randombytes.h"
 # include "randombytes_nativeclient.h"
@@ -14,23 +13,12 @@
 static void
 randombytes_nativeclient_buf(void * const buf, const size_t size)
 {
-    unsigned char          *buf_ = (unsigned char *) buf;
-    struct nacl_irt_random  rand_intf;
-    size_t                  readnb = (size_t) 0U;
-    size_t                  toread = size;
+    size_t readnb;
 
-    if (nacl_interface_query(NACL_IRT_RANDOM_v0_1, &rand_intf,
-                             sizeof rand_intf) != sizeof rand_intf) {
-        sodium_misuse();
+    if (nacl_secure_random(buf, size, &readnb) != 0) {
+        abort();
     }
-    while (toread > (size_t) 0U) {
-        if (rand_intf.get_random_bytes(buf_, size, &readnb) != 0 ||
-            readnb > size) {
-            sodium_misuse();
-        }
-        toread -= readnb;
-        buf_ += readnb;
-    }
+    assert(readnb == size);
 }
 
 static uint32_t
