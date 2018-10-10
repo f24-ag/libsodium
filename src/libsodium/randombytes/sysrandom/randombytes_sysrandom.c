@@ -1,14 +1,4 @@
 
-#include <stdlib.h>
-#include <sys/types.h>
-#ifndef _WIN32
-# include <sys/stat.h>
-# include <sys/time.h>
-#endif
-#ifdef __linux__
-# include <sys/syscall.h>
-#endif
-
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -19,11 +9,60 @@
 # include <unistd.h>
 #endif
 
+#include <stdlib.h>
+#include <sys/types.h>
+#ifndef _WIN32
+# include <sys/stat.h>
+# include <sys/time.h>
+#endif
+#ifdef __linux__
+# ifdef __dietlibc__
+#  define _LINUX_SOURCE
+#  include <sys/random.h>
+#  define HAVE_LINUX_COMPATIBLE_GETRANDOM
+# else /* __dietlibc__ */
+#  include <sys/syscall.h>
+#  if defined(SYS_getrandom) && defined(__NR_getrandom)
+#   define getrandom(B, S, F) syscall(SYS_getrandom, (B), (int) (S), (F))
+#   define HAVE_LINUX_COMPATIBLE_GETRANDOM
+#  endif
+# endif /* __dietlibc */
+#elif defined(__FreeBSD__)
+# include <sys/param.h>
+# if defined(__FreeBSD_version) && __FreeBSD_version >= 1200000
+#  include <sys/random.h>
+#  define HAVE_LINUX_COMPATIBLE_GETRANDOM
+# endif
+#endif
+#if !defined(NO_BLOCKING_RANDOM_POLL) && defined(__linux__)
+# define BLOCK_ON_DEV_RANDOM
+#endif
+#ifdef BLOCK_ON_DEV_RANDOM
+# include <poll.h>
+#endif
+
+#include "core.h"
+#include "private/common.h"
 #include "randombytes.h"
 #include "randombytes_sysrandom.h"
 #include "utils.h"
 
 #ifdef _WIN32
+/* `RtlGenRandom` is used over `CryptGenRandom` on Microsoft Windows based systems:
+ *  - `CryptGenRandom` requires pulling in `CryptoAPI` which causes unnecessary
+ *     memory overhead if this API is not being used for other purposes
+ *  - `RtlGenRandom` is thus called directly instead. A detailed explanation
+ *     can be found here: https://blogs.msdn.microsoft.com/michael_howard/2005/01/14/cryptographically-secure-random-number-on-windows-without-using-cryptoapi/
+ *
+ * In spite of the disclaimer on the `RtlGenRandom` documentation page that was
+ * written back in the Windows XP days, this function is here to stay. The CRT
+ * function `rand_s()` directly depends on it, so touching it would break many
+ * applications released since Windows XP.
+ *
+ * Also note that Rust, Firefox and BoringSSL (thus, Google Chrome and everything
+ * based on Chromium) also depend on it, and that libsodium allows the RNG to be
+ * replaced without patching nor recompiling the library.
+ */
 # include <windows.h>
 # define RtlGenRandom SystemFunction036
 # if defined(__cplusplus)
@@ -57,7 +96,7 @@ randombytes_sysrandom_stir(void)
 static void
 randombytes_sysrandom_buf(void * const buf, const size_t size)
 {
-    return arc4random_buf(buf, size);
+    arc4random_buf(buf, size);
 }
 
 static int
@@ -80,7 +119,7 @@ static SysRandom stream = {
     SODIUM_C99(.getrandom_available =) 0
 };
 
-#ifndef _WIN32
+# ifndef _WIN32
 static ssize_t
 safe_read(const int fd, void * const buf_, size_t size)
 {
@@ -104,38 +143,68 @@ safe_read(const int fd, void * const buf_, size_t size)
 
     return (ssize_t) (buf - (unsigned char *) buf_);
 }
-#endif
 
-#ifndef _WIN32
+#  ifdef BLOCK_ON_DEV_RANDOM
+static int
+randombytes_block_on_dev_random(void)
+{
+    struct pollfd pfd;
+    int           fd;
+    int           pret;
+
+    fd = open("/dev/random", O_RDONLY);
+    if (fd == -1) {
+        return 0;
+    }
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    do {
+        pret = poll(&pfd, 1, -1);
+    } while (pret < 0 && (errno == EINTR || errno == EAGAIN));
+    if (pret != 1) {
+        (void) close(fd);
+        errno = EIO;
+        return -1;
+    }
+    return close(fd);
+}
+#  endif /* BLOCK_ON_DEV_RANDOM */
+
 static int
 randombytes_sysrandom_random_dev_open(void)
 {
 /* LCOV_EXCL_START */
     struct stat        st;
     static const char *devices[] = {
-# ifndef USE_BLOCKING_RANDOM
+#  ifndef USE_BLOCKING_RANDOM
         "/dev/urandom",
-# endif
+#  endif
         "/dev/random", NULL
     };
-    const char **      device = devices;
+    const char       **device = devices;
     int                fd;
 
+#  ifdef BLOCK_ON_DEV_RANDOM
+    if (randombytes_block_on_dev_random() != 0) {
+        return -1;
+    }
+#  endif
     do {
         fd = open(*device, O_RDONLY);
         if (fd != -1) {
             if (fstat(fd, &st) == 0 &&
-# ifdef __COMPCERT__
+#  ifdef __COMPCERT__
                 1
-# elif defined(S_ISNAM)
+#  elif defined(S_ISNAM)
                 (S_ISNAM(st.st_mode) || S_ISCHR(st.st_mode))
-# else
+#  else
                 S_ISCHR(st.st_mode)
-# endif
+#  endif
                ) {
-# if defined(F_SETFD) && defined(FD_CLOEXEC)
+#  if defined(F_SETFD) && defined(FD_CLOEXEC)
                 (void) fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC);
-# endif
+#  endif
                 return fd;
             }
             (void) close(fd);
@@ -150,7 +219,7 @@ randombytes_sysrandom_random_dev_open(void)
 /* LCOV_EXCL_STOP */
 }
 
-# ifdef SYS_getrandom
+#  ifdef HAVE_LINUX_COMPATIBLE_GETRANDOM
 static int
 _randombytes_linux_getrandom(void * const buf, const size_t size)
 {
@@ -158,7 +227,7 @@ _randombytes_linux_getrandom(void * const buf, const size_t size)
 
     assert(size <= 256U);
     do {
-        readnb = syscall(SYS_getrandom, buf, (int) size, 0);
+        readnb = getrandom(buf, size, 0);
     } while (readnb < 0 && (errno == EINTR || errno == EAGAIN));
 
     return (readnb == (int) size) - 1;
@@ -184,14 +253,14 @@ randombytes_linux_getrandom(void * const buf_, size_t size)
 
     return 0;
 }
-# endif
+#  endif /* HAVE_LINUX_COMPATIBLE_GETRANDOM */
 
 static void
 randombytes_sysrandom_init(void)
 {
     const int     errno_save = errno;
 
-# ifdef SYS_getrandom
+#  ifdef HAVE_LINUX_COMPATIBLE_GETRANDOM
     {
         unsigned char fodder[16];
 
@@ -202,22 +271,22 @@ randombytes_sysrandom_init(void)
         }
         stream.getrandom_available = 0;
     }
-# endif
+#  endif
 
     if ((stream.random_data_source_fd =
          randombytes_sysrandom_random_dev_open()) == -1) {
-        abort(); /* LCOV_EXCL_LINE */
+        sodium_misuse(); /* LCOV_EXCL_LINE */
     }
     errno = errno_save;
 }
 
-#else /* _WIN32 */
+# else /* _WIN32 */
 
 static void
 randombytes_sysrandom_init(void)
 {
 }
-#endif
+# endif /* _WIN32 */
 
 static void
 randombytes_sysrandom_stir(void)
@@ -241,24 +310,24 @@ randombytes_sysrandom_close(void)
 {
     int ret = -1;
 
-#ifndef _WIN32
+# ifndef _WIN32
     if (stream.random_data_source_fd != -1 &&
         close(stream.random_data_source_fd) == 0) {
         stream.random_data_source_fd = -1;
         stream.initialized = 0;
         ret = 0;
     }
-# ifdef SYS_getrandom
+#  ifdef HAVE_LINUX_COMPATIBLE_GETRANDOM
     if (stream.getrandom_available != 0) {
         ret = 0;
     }
-# endif
-#else /* _WIN32 */
+#  endif
+# else /* _WIN32 */
     if (stream.initialized != 0) {
         stream.initialized = 0;
         ret = 0;
     }
-#endif
+# endif /* _WIN32 */
     return ret;
 }
 
@@ -266,31 +335,34 @@ static void
 randombytes_sysrandom_buf(void * const buf, const size_t size)
 {
     randombytes_sysrandom_stir_if_needed();
-#ifdef ULONG_LONG_MAX
+# if defined(ULONG_LONG_MAX) && defined(SIZE_MAX)
+#  if SIZE_MAX > ULONG_LONG_MAX
     /* coverity[result_independent_of_operands] */
     assert(size <= ULONG_LONG_MAX);
-#endif
-#ifndef _WIN32
-# ifdef SYS_getrandom
+#  endif
+# endif
+# ifndef _WIN32
+#  ifdef HAVE_LINUX_COMPATIBLE_GETRANDOM
     if (stream.getrandom_available != 0) {
         if (randombytes_linux_getrandom(buf, size) != 0) {
-            abort();
+            sodium_misuse(); /* LCOV_EXCL_LINE */
         }
         return;
     }
-# endif
+#  endif
     if (stream.random_data_source_fd == -1 ||
         safe_read(stream.random_data_source_fd, buf, size) != (ssize_t) size) {
-        abort(); /* LCOV_EXCL_LINE */
+        sodium_misuse(); /* LCOV_EXCL_LINE */
     }
-#else
-    if (size > (size_t) 0xffffffff) {
-        abort(); /* LCOV_EXCL_LINE */
+# else /* _WIN32 */
+    COMPILER_ASSERT(randombytes_BYTES_MAX <= 0xffffffffUL);
+    if (size > (size_t) 0xffffffffUL) {
+        sodium_misuse(); /* LCOV_EXCL_LINE */
     }
     if (! RtlGenRandom((PVOID) buf, (ULONG) size)) {
-        abort(); /* LCOV_EXCL_LINE */
+        sodium_misuse(); /* LCOV_EXCL_LINE */
     }
-#endif
+# endif /* _WIN32 */
 }
 
 static uint32_t

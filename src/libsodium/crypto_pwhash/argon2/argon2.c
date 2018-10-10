@@ -11,30 +11,32 @@
  * <http://creativecommons.org/publicdomain/zero/1.0/>.
  */
 
-#include <stdint.h>
-#include <string.h>
-#include <stdlib.h>
-#include <stdio.h>
 #include <limits.h>
-
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "utils.h"
 
-#include "argon2.h"
-#include "argon2-encoding.h"
 #include "argon2-core.h"
+#include "argon2-encoding.h"
+#include "argon2.h"
 
-int argon2_core(argon2_context *context, argon2_type type) {
+int
+argon2_ctx(argon2_context *context, argon2_type type)
+{
     /* 1. Validate all inputs */
-    int result = validate_inputs(context);
-    uint32_t memory_blocks, segment_length;
+    int               result = validate_inputs(context);
+    uint32_t          memory_blocks, segment_length;
+    uint32_t          pass;
     argon2_instance_t instance;
 
     if (ARGON2_OK != result) {
         return result;
     }
 
-    if (Argon2_i != type) {
+    if (type != Argon2_id && type != Argon2_i) {
         return ARGON2_INCORRECT_TYPE;
     }
 
@@ -50,14 +52,15 @@ int argon2_core(argon2_context *context, argon2_type type) {
     /* Ensure that all segments have equal length */
     memory_blocks = segment_length * (context->lanes * ARGON2_SYNC_POINTS);
 
-    instance.region = NULL;
-    instance.passes = context->t_cost;
-    instance.memory_blocks = memory_blocks;
+    instance.region         = NULL;
+    instance.passes         = context->t_cost;
+    instance.current_pass   = ~ 0U;
+    instance.memory_blocks  = memory_blocks;
     instance.segment_length = segment_length;
-    instance.lane_length = segment_length * ARGON2_SYNC_POINTS;
-    instance.lanes = context->lanes;
-    instance.threads = context->threads;
-    instance.type = type;
+    instance.lane_length    = segment_length * ARGON2_SYNC_POINTS;
+    instance.lanes          = context->lanes;
+    instance.threads        = context->threads;
+    instance.type           = type;
 
     /* 3. Initialization: Hashing inputs, allocating memory, filling first
      * blocks
@@ -69,10 +72,8 @@ int argon2_core(argon2_context *context, argon2_type type) {
     }
 
     /* 4. Filling memory */
-    result = fill_memory_blocks(&instance);
-
-    if (ARGON2_OK != result) {
-        return result;
+    for (pass = 0; pass < instance.passes; pass++) {
+        fill_memory_blocks(&instance, pass);
     }
 
     /* 5. Finalization */
@@ -81,25 +82,26 @@ int argon2_core(argon2_context *context, argon2_type type) {
     return ARGON2_OK;
 }
 
-int argon2_hash(const uint32_t t_cost, const uint32_t m_cost,
-                const uint32_t parallelism, const void *pwd,
-                const size_t pwdlen, const void *salt, const size_t saltlen,
-                void *hash, const size_t hashlen, char *encoded,
-                const size_t encodedlen, argon2_type type) {
-
+int
+argon2_hash(const uint32_t t_cost, const uint32_t m_cost,
+            const uint32_t parallelism, const void *pwd, const size_t pwdlen,
+            const void *salt, const size_t saltlen, void *hash,
+            const size_t hashlen, char *encoded, const size_t encodedlen,
+            argon2_type type)
+{
     argon2_context context;
-    int result;
-    uint8_t *out;
+    int            result;
+    uint8_t       *out;
 
-    if (pwdlen > UINT32_MAX) {
+    if (pwdlen > ARGON2_MAX_PWD_LENGTH) {
         return ARGON2_PWD_TOO_LONG;
     }
 
-    if (hashlen > UINT32_MAX) {
+    if (hashlen > ARGON2_MAX_OUTLEN) {
         return ARGON2_OUTPUT_TOO_LONG;
     }
 
-    if (saltlen > UINT32_MAX) {
+    if (saltlen > ARGON2_MAX_SALT_LENGTH) {
         return ARGON2_SALT_TOO_LONG;
     }
 
@@ -108,26 +110,26 @@ int argon2_hash(const uint32_t t_cost, const uint32_t m_cost,
         return ARGON2_MEMORY_ALLOCATION_ERROR;
     }
 
-    context.out = (uint8_t *)out;
-    context.outlen = (uint32_t)hashlen;
-    context.pwd = (uint8_t *)pwd;
-    context.pwdlen = (uint32_t)pwdlen;
-    context.salt = (uint8_t *)salt;
-    context.saltlen = (uint32_t)saltlen;
-    context.secret = NULL;
+    context.out       = (uint8_t *) out;
+    context.outlen    = (uint32_t) hashlen;
+    context.pwd       = (uint8_t *) pwd;
+    context.pwdlen    = (uint32_t) pwdlen;
+    context.salt      = (uint8_t *) salt;
+    context.saltlen   = (uint32_t) saltlen;
+    context.secret    = NULL;
     context.secretlen = 0;
-    context.ad = NULL;
-    context.adlen = 0;
-    context.t_cost = t_cost;
-    context.m_cost = m_cost;
-    context.lanes = parallelism;
-    context.threads = parallelism;
-    context.flags = ARGON2_DEFAULT_FLAGS;
+    context.ad        = NULL;
+    context.adlen     = 0;
+    context.t_cost    = t_cost;
+    context.m_cost    = m_cost;
+    context.lanes     = parallelism;
+    context.threads   = parallelism;
+    context.flags     = ARGON2_DEFAULT_FLAGS;
 
-    result = argon2_core(&context, type);
+    result = argon2_ctx(&context, type);
 
     if (result != ARGON2_OK) {
-        memset(out, 0x00, hashlen);
+        sodium_memzero(out, hashlen);
         free(out);
         return result;
     }
@@ -139,53 +141,91 @@ int argon2_hash(const uint32_t t_cost, const uint32_t m_cost,
 
     /* if encoding requested, write it */
     if (encoded && encodedlen) {
-        if (!encode_string(encoded, encodedlen, &context, type)) {
-            memset(out, 0x00, hashlen);
-            memset(encoded, 0x00, encodedlen);
+        if (encode_string(encoded, encodedlen, &context, type) != ARGON2_OK) {
+            sodium_memzero(out, hashlen);
+            sodium_memzero(encoded, encodedlen);
             free(out);
             return ARGON2_ENCODING_FAIL;
         }
     }
 
+    sodium_memzero(out, hashlen);
     free(out);
 
     return ARGON2_OK;
 }
 
-int argon2i_hash_encoded(const uint32_t t_cost, const uint32_t m_cost,
-                         const uint32_t parallelism, const void *pwd,
-                         const size_t pwdlen, const void *salt,
-                         const size_t saltlen, const size_t hashlen,
-                         char *encoded, const size_t encodedlen) {
-
+int
+argon2i_hash_encoded(const uint32_t t_cost, const uint32_t m_cost,
+                     const uint32_t parallelism, const void *pwd,
+                     const size_t pwdlen, const void *salt,
+                     const size_t saltlen, const size_t hashlen, char *encoded,
+                     const size_t encodedlen)
+{
     return argon2_hash(t_cost, m_cost, parallelism, pwd, pwdlen, salt, saltlen,
                        NULL, hashlen, encoded, encodedlen, Argon2_i);
 }
 
-int argon2i_hash_raw(const uint32_t t_cost, const uint32_t m_cost,
-                     const uint32_t parallelism, const void *pwd,
-                     const size_t pwdlen, const void *salt,
-                     const size_t saltlen, void *hash, const size_t hashlen) {
-
+int
+argon2i_hash_raw(const uint32_t t_cost, const uint32_t m_cost,
+                 const uint32_t parallelism, const void *pwd,
+                 const size_t pwdlen, const void *salt, const size_t saltlen,
+                 void *hash, const size_t hashlen)
+{
     return argon2_hash(t_cost, m_cost, parallelism, pwd, pwdlen, salt, saltlen,
                        hash, hashlen, NULL, 0, Argon2_i);
 }
 
-int argon2_verify(const char *encoded, const void *pwd, const size_t pwdlen,
-                  argon2_type type) {
+int
+argon2id_hash_encoded(const uint32_t t_cost, const uint32_t m_cost,
+                      const uint32_t parallelism, const void *pwd,
+                      const size_t pwdlen, const void *salt,
+                      const size_t saltlen, const size_t hashlen, char *encoded,
+                      const size_t encodedlen)
+{
+    return argon2_hash(t_cost, m_cost, parallelism, pwd, pwdlen, salt, saltlen,
+                       NULL, hashlen, encoded, encodedlen, Argon2_id);
+}
 
+int
+argon2id_hash_raw(const uint32_t t_cost, const uint32_t m_cost,
+                  const uint32_t parallelism, const void *pwd,
+                  const size_t pwdlen, const void *salt, const size_t saltlen,
+                  void *hash, const size_t hashlen)
+{
+    return argon2_hash(t_cost, m_cost, parallelism, pwd, pwdlen, salt, saltlen,
+                       hash, hashlen, NULL, 0, Argon2_id);
+}
+
+int
+argon2_verify(const char *encoded, const void *pwd, const size_t pwdlen,
+              argon2_type type)
+{
     argon2_context ctx;
-    uint8_t *out;
-    int ret;
+    uint8_t       *out;
+    int            decode_result;
+    int            ret;
+    size_t         encoded_len;
+
+    memset(&ctx, 0, sizeof ctx);
+
+    ctx.pwd       = NULL;
+    ctx.pwdlen    = 0;
+    ctx.secret    = NULL;
+    ctx.secretlen = 0;
 
     /* max values, to be updated in decode_string */
-    ctx.adlen = 512;
-    ctx.saltlen = 512;
-    ctx.outlen = 512;
+    encoded_len = strlen(encoded);
+    if (encoded_len > UINT32_MAX) {
+        return ARGON2_DECODING_LENGTH_FAIL;
+    }
+    ctx.adlen   = (uint32_t) encoded_len;
+    ctx.saltlen = (uint32_t) encoded_len;
+    ctx.outlen  = (uint32_t) encoded_len;
 
-    ctx.ad = (uint8_t *) malloc(ctx.adlen);
+    ctx.ad   = (uint8_t *) malloc(ctx.adlen);
     ctx.salt = (uint8_t *) malloc(ctx.saltlen);
-    ctx.out = (uint8_t *) malloc(ctx.outlen);
+    ctx.out  = (uint8_t *) malloc(ctx.outlen);
     if (!ctx.out || !ctx.salt || !ctx.ad) {
         free(ctx.ad);
         free(ctx.salt);
@@ -200,50 +240,38 @@ int argon2_verify(const char *encoded, const void *pwd, const size_t pwdlen,
         return ARGON2_MEMORY_ALLOCATION_ERROR;
     }
 
-    if(decode_string(&ctx, encoded, type) != 1) {
+    decode_result = decode_string(&ctx, encoded, type);
+    if (decode_result != ARGON2_OK) {
         free(ctx.ad);
         free(ctx.salt);
         free(ctx.out);
         free(out);
-        return ARGON2_DECODING_FAIL;
+        return decode_result;
     }
 
-    ret = argon2_hash(ctx.t_cost, ctx.m_cost, ctx.threads, pwd, pwdlen, ctx.salt,
-                      ctx.saltlen, out, ctx.outlen, NULL, 0, type);
+    ret = argon2_hash(ctx.t_cost, ctx.m_cost, ctx.threads, pwd, pwdlen,
+                      ctx.salt, ctx.saltlen, out, ctx.outlen, NULL, 0, type);
 
     free(ctx.ad);
     free(ctx.salt);
 
     if (ret != ARGON2_OK || sodium_memcmp(out, ctx.out, ctx.outlen) != 0) {
-        free(out);
-        free(ctx.out);
-        return ARGON2_DECODING_FAIL;
+        ret = ARGON2_VERIFY_MISMATCH;
     }
     free(out);
     free(ctx.out);
 
-    return ARGON2_OK;
+    return ret;
 }
 
-int argon2i_verify(const char *encoded, const void *pwd, const size_t pwdlen) {
+int
+argon2i_verify(const char *encoded, const void *pwd, const size_t pwdlen)
+{
     return argon2_verify(encoded, pwd, pwdlen, Argon2_i);
 }
 
-int argon2i(argon2_context *context) {
-    return argon2_core(context, Argon2_i);
-}
-
-int verify_i(argon2_context *context, const char *hash) {
-    int result;
-    if (0 == context->outlen || NULL == hash) {
-        return ARGON2_OUT_PTR_MISMATCH;
-    }
-
-    result = argon2_core(context, Argon2_i);
-
-    if (ARGON2_OK != result) {
-        return result;
-    }
-
-    return 0 == memcmp(hash, context->out, context->outlen);
+int
+argon2id_verify(const char *encoded, const void *pwd, const size_t pwdlen)
+{
+    return argon2_verify(encoded, pwd, pwdlen, Argon2_id);
 }
