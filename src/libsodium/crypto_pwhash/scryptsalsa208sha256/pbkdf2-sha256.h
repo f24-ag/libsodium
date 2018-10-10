@@ -28,9 +28,9 @@
 #ifndef pbkdf2_sha256_H
 #define pbkdf2_sha256_H
 
-#include <sys/types.h>
-
 #include <stdint.h>
+
+#include <sys/types.h>
 
 #include "crypto_auth_hmacsha256.h"
 
@@ -40,7 +40,7 @@
  * write the output to buf.  The value dkLen must be at most 32 * (2^32 - 1).
  */
 SODIUM_EXPORT
-void PBKDF2_SHA256(const uint8_t *, size_t, const uint8_t *, size_t,
-                   uint64_t, uint8_t *, size_t);
+void PBKDF2_SHA256(const uint8_t *, size_t, const uint8_t *, size_t, uint64_t,
+                   uint8_t *, size_t);
 
 #endif /* !_SHA256_H_ */

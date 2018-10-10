@@ -11,56 +11,53 @@
  * <http://creativecommons.org/publicdomain/zero/1.0/>.
  */
 
-#ifdef HAVE_SYS_MMAN_H
-# include <sys/mman.h>
-#endif
 #include <errno.h>
-#include <inttypes.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include <sys/types.h>
+#ifdef HAVE_SYS_MMAN_H
+# include <sys/mman.h>
+#endif
+
 #include "crypto_generichash_blake2b.h"
+#include "private/common.h"
+#include "private/implementations.h"
 #include "runtime.h"
 #include "utils.h"
 
 #include "argon2-core.h"
-#include "argon2-impl.h"
 #include "blake2b-long.h"
 
 #if !defined(MAP_ANON) && defined(MAP_ANONYMOUS)
 # define MAP_ANON MAP_ANONYMOUS
 #endif
+#ifndef MAP_NOCORE
+# define MAP_NOCORE 0
+#endif
+#ifndef MAP_POPULATE
+# define MAP_POPULATE 0
+#endif
 
 static fill_segment_fn fill_segment = fill_segment_ref;
 
-/***************Instance and Position constructors**********/
-void init_block_value(block *b, uint8_t in) {
-    memset(b->v, in, sizeof(b->v));
-}
-
-void copy_block(block *dst, const block *src) {
-    memcpy(dst->v, src->v, sizeof(uint64_t) * ARGON2_QWORDS_IN_BLOCK);
-}
-
-void xor_block(block *dst, const block *src) {
-    int i;
+static void
+load_block(block *dst, const void *input)
+{
+    unsigned i;
     for (i = 0; i < ARGON2_QWORDS_IN_BLOCK; ++i) {
-        dst->v[i] ^= src->v[i];
+        dst->v[i] = LOAD64_LE((const uint8_t *) input + i * sizeof(dst->v[i]));
     }
 }
 
-static void load_block(block *dst, const void *input) {
+static void
+store_block(void *output, const block *src)
+{
     unsigned i;
     for (i = 0; i < ARGON2_QWORDS_IN_BLOCK; ++i) {
-        dst->v[i] = load64((const uint8_t *)input + i * sizeof(dst->v[i]));
-    }
-}
-
-static void store_block(void *output, const block *src) {
-    unsigned i;
-    for (i = 0; i < ARGON2_QWORDS_IN_BLOCK; ++i) {
-        store64((uint8_t *)output + i * sizeof(src->v[i]), src->v[i]);
+        STORE64_LE((uint8_t *) output + i * sizeof(src->v[i]), src->v[i]);
     }
 }
 
@@ -70,36 +67,37 @@ static void store_block(void *output, const block *src) {
  * @param m_cost number of blocks to allocate in the memory
  * @return ARGON2_OK if @memory is a valid pointer and memory is allocated
  */
-static int allocate_memory(block_region **memory, uint32_t m_cost);
+static int allocate_memory(block_region **region, uint32_t m_cost);
 
-static int allocate_memory(block_region **region, uint32_t m_cost) {
-    void *base;
+static int
+allocate_memory(block_region **region, uint32_t m_cost)
+{
+    void * base;
     block *memory;
     size_t memory_size;
 
     if (region == NULL) {
-        return ARGON2_MEMORY_ALLOCATION_ERROR;
+        return ARGON2_MEMORY_ALLOCATION_ERROR; /* LCOV_EXCL_LINE */
     }
     memory_size = sizeof(block) * m_cost;
     if (m_cost == 0 ||
-        memory_size / m_cost != sizeof(block)) { /*1. Check for multiplication overflow*/
-        return ARGON2_MEMORY_ALLOCATION_ERROR;
+        memory_size / m_cost !=
+            sizeof(block)) { /*1. Check for multiplication overflow*/
+        return ARGON2_MEMORY_ALLOCATION_ERROR; /* LCOV_EXCL_LINE */
     }
-    *region = (block_region *)malloc(sizeof(block_region));  /*2. Try to allocate region*/
+    *region = (block_region *) malloc(
+        sizeof(block_region)); /*2. Try to allocate region*/
     if (!*region) {
-        return ARGON2_MEMORY_ALLOCATION_ERROR;
+        return ARGON2_MEMORY_ALLOCATION_ERROR; /* LCOV_EXCL_LINE */
     }
+    (*region)->base = (*region)->memory = NULL;
 
 #if defined(MAP_ANON) && defined(HAVE_MMAP)
     if ((base = mmap(NULL, memory_size, PROT_READ | PROT_WRITE,
-# ifdef MAP_NOCORE
-                     MAP_ANON | MAP_PRIVATE | MAP_NOCORE,
-# else
-                     MAP_ANON | MAP_PRIVATE,
-# endif
+                     MAP_ANON | MAP_PRIVATE | MAP_NOCORE | MAP_POPULATE,
                      -1, 0)) == MAP_FAILED) {
         base = NULL; /* LCOV_EXCL_LINE */
-    }
+    }                /* LCOV_EXCL_LINE */
     memcpy(&memory, &base, sizeof memory);
 #elif defined(HAVE_POSIX_MEMALIGN)
     if ((errno = posix_memalign((void **) &base, 64, memory_size)) != 0) {
@@ -109,7 +107,7 @@ static int allocate_memory(block_region **region, uint32_t m_cost) {
 #else
     memory = NULL;
     if (memory_size + 63 < memory_size) {
-        base = NULL;
+        base  = NULL;
         errno = ENOMEM;
     } else if ((base = malloc(memory_size + 63)) != NULL) {
         uint8_t *aligned = ((uint8_t *) base) + 63;
@@ -117,12 +115,12 @@ static int allocate_memory(block_region **region, uint32_t m_cost) {
         memcpy(&memory, &aligned, sizeof memory);
     }
 #endif
-    if (!memory) {
-        return ARGON2_MEMORY_ALLOCATION_ERROR;
+    if (base == NULL) {
+        return ARGON2_MEMORY_ALLOCATION_ERROR; /* LCOV_EXCL_LINE */
     }
-    (*region)->base = base;
+    (*region)->base   = base;
     (*region)->memory = memory;
-    (*region)->size = base ? memory_size : 0;
+    (*region)->size   = memory_size;
 
     return ARGON2_OK;
 }
@@ -135,20 +133,32 @@ static int allocate_memory(block_region **region, uint32_t m_cost) {
  */
 static void clear_memory(argon2_instance_t *instance, int clear);
 
-static void clear_memory(argon2_instance_t *instance, int clear) {
-    if (instance->region != NULL && clear) {
-        sodium_memzero(instance->region->memory,
-                       sizeof(block) * instance->memory_blocks);
+static void
+clear_memory(argon2_instance_t *instance, int clear)
+{
+    /* LCOV_EXCL_START */
+    if (clear) {
+        if (instance->region != NULL) {
+            sodium_memzero(instance->region->memory,
+                           sizeof(block) * instance->memory_blocks);
+        }
+        if (instance->pseudo_rands != NULL) {
+            sodium_memzero(instance->pseudo_rands,
+                           sizeof(uint64_t) * instance->segment_length);
+        }
     }
+    /* LCOV_EXCL_STOP */
 }
 
 /* Deallocates memory
  * @param memory pointer to the blocks
  */
-static void free_memory(block_region *memory);
+static void free_memory(block_region *region);
 
-static void free_memory(block_region *region) {
-    if (region->base) {
+static void
+free_memory(block_region *region)
+{
+    if (region && region->base) {
 #if defined(MAP_ANON) && defined(HAVE_MMAP)
         if (munmap(region->base, region->size)) {
             return; /* LCOV_EXCL_LINE */
@@ -160,18 +170,35 @@ static void free_memory(block_region *region) {
     free(region);
 }
 
-void finalize(const argon2_context *context, argon2_instance_t *instance) {
+void
+free_instance(argon2_instance_t *instance, int flags)
+{
+    /* Clear memory */
+    clear_memory(instance, flags & ARGON2_FLAG_CLEAR_MEMORY);
+
+    /* Deallocate the memory */
+    free(instance->pseudo_rands);
+    instance->pseudo_rands = NULL;
+    free_memory(instance->region);
+    instance->region = NULL;
+}
+
+void
+finalize(const argon2_context *context, argon2_instance_t *instance)
+{
     if (context != NULL && instance != NULL) {
-        block blockhash;
+        block    blockhash;
         uint32_t l;
 
-        copy_block(&blockhash, instance->region->memory + instance->lane_length - 1);
+        copy_block(&blockhash,
+                   instance->region->memory + instance->lane_length - 1);
 
         /* XOR the last blocks */
         for (l = 1; l < instance->lanes; ++l) {
             uint32_t last_block_in_lane =
                 l * instance->lane_length + (instance->lane_length - 1);
-            xor_block(&blockhash, instance->region->memory + last_block_in_lane);
+            xor_block(&blockhash,
+                      instance->region->memory + last_block_in_lane);
         }
 
         /* Hash the result */
@@ -186,114 +213,36 @@ void finalize(const argon2_context *context, argon2_instance_t *instance) {
                            ARGON2_BLOCK_SIZE); /* clear blockhash_bytes */
         }
 
-        /* Clear memory */
-        clear_memory(instance, context->flags & ARGON2_FLAG_CLEAR_PASSWORD);
-
-        /* Deallocate the memory */
-        free_memory(instance->region);
+        free_instance(instance, context->flags);
     }
 }
 
-uint32_t index_alpha(const argon2_instance_t *instance,
-                     const argon2_position_t *position, uint32_t pseudo_rand,
-                     int same_lane) {
-    /*
-     * Pass 0:
-     *      This lane : all already finished segments plus already constructed
-     * blocks in this segment
-     *      Other lanes : all already finished segments
-     * Pass 1+:
-     *      This lane : (SYNC_POINTS - 1) last segments plus already constructed
-     * blocks in this segment
-     *      Other lanes : (SYNC_POINTS - 1) last segments
-     */
-    uint32_t reference_area_size;
-    uint64_t relative_position;
-    uint32_t start_position, absolute_position;
-
-    if (0 == position->pass) {
-        /* First pass */
-        if (0 == position->slice) {
-            /* First slice */
-            reference_area_size =
-                position->index - 1; /* all but the previous */
-        } else {
-            if (same_lane) {
-                /* The same lane => add current segment */
-                reference_area_size =
-                    position->slice * instance->segment_length +
-                    position->index - 1;
-            } else {
-                reference_area_size =
-                    position->slice * instance->segment_length +
-                    ((position->index == 0) ? (-1) : 0);
-            }
-        }
-    } else {
-        /* Second pass */
-        if (same_lane) {
-            reference_area_size = instance->lane_length -
-                                  instance->segment_length + position->index -
-                                  1;
-        } else {
-            reference_area_size = instance->lane_length -
-                                  instance->segment_length +
-                                  ((position->index == 0) ? (-1) : 0);
-        }
-    }
-
-    /* 1.2.4. Mapping pseudo_rand to 0..<reference_area_size-1> and produce
-     * relative position */
-    relative_position = pseudo_rand;
-    relative_position = relative_position * relative_position >> 32;
-    relative_position = reference_area_size - 1 -
-                        (reference_area_size * relative_position >> 32);
-
-    /* 1.2.5 Computing starting position */
-    start_position = 0;
-
-    if (0 != position->pass) {
-        start_position = (position->slice == ARGON2_SYNC_POINTS - 1)
-                             ? 0
-                             : (position->slice + 1) * instance->segment_length;
-    }
-
-    /* 1.2.6. Computing absolute position */
-    absolute_position = (start_position + relative_position) %
-                        instance->lane_length; /* absolute position */
-    return absolute_position;
-}
-
-int fill_memory_blocks(argon2_instance_t *instance) {
-    int result;
-    uint32_t r, s;
+void
+fill_memory_blocks(argon2_instance_t *instance, uint32_t pass)
+{
+    argon2_position_t position;
+    uint32_t l;
+    uint32_t s;
 
     if (instance == NULL || instance->lanes == 0) {
-        return ARGON2_OK;
+        return; /* LCOV_EXCL_LINE */
     }
 
-    for (r = 0; r < instance->passes; ++r) {
-        for (s = 0; s < ARGON2_SYNC_POINTS; ++s) {
-            uint32_t l;
-
-            for (l = 0; l < instance->lanes; ++l) {
-                argon2_position_t position;
-
-                position.pass = r;
-                position.lane = l;
-                position.slice = (uint8_t)s;
-                position.index = 0;
-                result = fill_segment(instance, position);
-                if (ARGON2_OK != result) {
-                    return result;
-                }
-            }
+    position.pass = pass;
+    for (s = 0; s < ARGON2_SYNC_POINTS; ++s) {
+        position.slice = (uint8_t) s;
+        for (l = 0; l < instance->lanes; ++l) {
+            position.lane  = l;
+            position.index = 0;
+            fill_segment(instance, position);
         }
     }
-    return ARGON2_OK;
 }
 
-int validate_inputs(const argon2_context *context) {
+int
+validate_inputs(const argon2_context *context)
+{
+    /* LCOV_EXCL_START */
     if (NULL == context) {
         return ARGON2_INCORRECT_PARAMETER;
     }
@@ -311,37 +260,37 @@ int validate_inputs(const argon2_context *context) {
         return ARGON2_OUTPUT_TOO_LONG;
     }
 
-    /* Validate password length */
+    /* Validate password (required param) */
     if (NULL == context->pwd) {
         if (0 != context->pwdlen) {
             return ARGON2_PWD_PTR_MISMATCH;
         }
-    } else {
-        if (ARGON2_MIN_PWD_LENGTH > context->pwdlen) {
-            return ARGON2_PWD_TOO_SHORT;
-        }
-
-        if (ARGON2_MAX_PWD_LENGTH < context->pwdlen) {
-            return ARGON2_PWD_TOO_LONG;
-        }
     }
 
-    /* Validate salt length */
+    if (ARGON2_MIN_PWD_LENGTH > context->pwdlen) {
+        return ARGON2_PWD_TOO_SHORT;
+    }
+
+    if (ARGON2_MAX_PWD_LENGTH < context->pwdlen) {
+        return ARGON2_PWD_TOO_LONG;
+    }
+
+    /* Validate salt (required param) */
     if (NULL == context->salt) {
         if (0 != context->saltlen) {
             return ARGON2_SALT_PTR_MISMATCH;
         }
-    } else {
-        if (ARGON2_MIN_SALT_LENGTH > context->saltlen) {
-            return ARGON2_SALT_TOO_SHORT;
-        }
-
-        if (ARGON2_MAX_SALT_LENGTH < context->saltlen) {
-            return ARGON2_SALT_TOO_LONG;
-        }
     }
 
-    /* Validate secret length */
+    if (ARGON2_MIN_SALT_LENGTH > context->saltlen) {
+        return ARGON2_SALT_TOO_SHORT;
+    }
+
+    if (ARGON2_MAX_SALT_LENGTH < context->saltlen) {
+        return ARGON2_SALT_TOO_LONG;
+    }
+
+    /* Validate secret (optional param) */
     if (NULL == context->secret) {
         if (0 != context->secretlen) {
             return ARGON2_SECRET_PTR_MISMATCH;
@@ -356,7 +305,7 @@ int validate_inputs(const argon2_context *context) {
         }
     }
 
-    /* Validate associated data */
+    /* Validate associated data (optional param) */
     if (NULL == context->ad) {
         if (0 != context->adlen) {
             return ARGON2_AD_PTR_MISMATCH;
@@ -380,7 +329,7 @@ int validate_inputs(const argon2_context *context) {
         return ARGON2_MEMORY_TOO_MUCH;
     }
 
-    if (context->m_cost < 8*context->lanes) {
+    if (context->m_cost < 8 * context->lanes) {
         return ARGON2_MEMORY_TOO_LITTLE;
     }
 
@@ -410,25 +359,27 @@ int validate_inputs(const argon2_context *context) {
     if (ARGON2_MAX_THREADS < context->threads) {
         return ARGON2_THREADS_TOO_MANY;
     }
+    /* LCOV_EXCL_STOP */
 
     return ARGON2_OK;
 }
 
-void fill_first_blocks(uint8_t *blockhash, const argon2_instance_t *instance) {
+void
+fill_first_blocks(uint8_t *blockhash, const argon2_instance_t *instance)
+{
     uint32_t l;
     /* Make the first and second block in each lane as G(H0||i||0) or
        G(H0||i||1) */
     uint8_t blockhash_bytes[ARGON2_BLOCK_SIZE];
     for (l = 0; l < instance->lanes; ++l) {
-
-        store32(blockhash + ARGON2_PREHASH_DIGEST_LENGTH, 0);
-        store32(blockhash + ARGON2_PREHASH_DIGEST_LENGTH + 4, l);
+        STORE32_LE(blockhash + ARGON2_PREHASH_DIGEST_LENGTH, 0);
+        STORE32_LE(blockhash + ARGON2_PREHASH_DIGEST_LENGTH + 4, l);
         blake2b_long(blockhash_bytes, ARGON2_BLOCK_SIZE, blockhash,
                      ARGON2_PREHASH_SEED_LENGTH);
         load_block(&instance->region->memory[l * instance->lane_length + 0],
                    blockhash_bytes);
 
-        store32(blockhash + ARGON2_PREHASH_DIGEST_LENGTH, 1);
+        STORE32_LE(blockhash + ARGON2_PREHASH_DIGEST_LENGTH, 1);
         blake2b_long(blockhash_bytes, ARGON2_BLOCK_SIZE, blockhash,
                      ARGON2_PREHASH_SEED_LENGTH);
         load_block(&instance->region->memory[l * instance->lane_length + 1],
@@ -437,92 +388,109 @@ void fill_first_blocks(uint8_t *blockhash, const argon2_instance_t *instance) {
     sodium_memzero(blockhash_bytes, ARGON2_BLOCK_SIZE);
 }
 
-void initial_hash(uint8_t *blockhash, argon2_context *context,
-                  argon2_type type) {
+void
+initial_hash(uint8_t *blockhash, argon2_context *context, argon2_type type)
+{
     crypto_generichash_blake2b_state BlakeHash;
-    uint8_t value[4U /* sizeof(uint32_t) */];
+    uint8_t                          value[4U /* sizeof(uint32_t) */];
 
     if (NULL == context || NULL == blockhash) {
-        return;
+        return; /* LCOV_EXCL_LINE */
     }
 
     crypto_generichash_blake2b_init(&BlakeHash, NULL, 0U,
                                     ARGON2_PREHASH_DIGEST_LENGTH);
 
-    store32(&value, context->lanes);
-    crypto_generichash_blake2b_update(&BlakeHash, (const uint8_t *)&value, sizeof(value));
+    STORE32_LE(value, context->lanes);
+    crypto_generichash_blake2b_update(&BlakeHash, value, sizeof(value));
 
-    store32(&value, context->outlen);
-    crypto_generichash_blake2b_update(&BlakeHash, (const uint8_t *)&value, sizeof(value));
+    STORE32_LE(value, context->outlen);
+    crypto_generichash_blake2b_update(&BlakeHash, value, sizeof(value));
 
-    store32(&value, context->m_cost);
-    crypto_generichash_blake2b_update(&BlakeHash, (const uint8_t *)&value, sizeof(value));
+    STORE32_LE(value, context->m_cost);
+    crypto_generichash_blake2b_update(&BlakeHash, value, sizeof(value));
 
-    store32(&value, context->t_cost);
-    crypto_generichash_blake2b_update(&BlakeHash, (const uint8_t *)&value, sizeof(value));
+    STORE32_LE(value, context->t_cost);
+    crypto_generichash_blake2b_update(&BlakeHash, value, sizeof(value));
 
-    store32(&value, ARGON2_VERSION_NUMBER);
-    crypto_generichash_blake2b_update(&BlakeHash, (const uint8_t *)&value, sizeof(value));
+    STORE32_LE(value, ARGON2_VERSION_NUMBER);
+    crypto_generichash_blake2b_update(&BlakeHash, value, sizeof(value));
 
-    store32(&value, (uint32_t)type);
-    crypto_generichash_blake2b_update(&BlakeHash, (const uint8_t *)&value, sizeof(value));
+    STORE32_LE(value, (uint32_t) type);
+    crypto_generichash_blake2b_update(&BlakeHash, value, sizeof(value));
 
-    store32(&value, context->pwdlen);
-    crypto_generichash_blake2b_update(&BlakeHash, (const uint8_t *)&value, sizeof(value));
+    STORE32_LE(value, context->pwdlen);
+    crypto_generichash_blake2b_update(&BlakeHash, value, sizeof(value));
 
     if (context->pwd != NULL) {
-        crypto_generichash_blake2b_update(&BlakeHash, (const uint8_t *)context->pwd,
-                                          context->pwdlen);
+        crypto_generichash_blake2b_update(
+            &BlakeHash, (const uint8_t *) context->pwd, context->pwdlen);
 
+        /* LCOV_EXCL_START */
         if (context->flags & ARGON2_FLAG_CLEAR_PASSWORD) {
             sodium_memzero(context->pwd, context->pwdlen);
             context->pwdlen = 0;
         }
+        /* LCOV_EXCL_STOP */
     }
 
-    store32(&value, context->saltlen);
-    crypto_generichash_blake2b_update(&BlakeHash, (const uint8_t *)&value, sizeof(value));
+    STORE32_LE(value, context->saltlen);
+    crypto_generichash_blake2b_update(&BlakeHash, value, sizeof(value));
 
     if (context->salt != NULL) {
-        crypto_generichash_blake2b_update(&BlakeHash, (const uint8_t *)context->salt,
-                       context->saltlen);
+        crypto_generichash_blake2b_update(
+            &BlakeHash, (const uint8_t *) context->salt, context->saltlen);
     }
 
-    store32(&value, context->secretlen);
-    crypto_generichash_blake2b_update(&BlakeHash, (const uint8_t *)&value, sizeof(value));
+    STORE32_LE(value, context->secretlen);
+    crypto_generichash_blake2b_update(&BlakeHash, value, sizeof(value));
 
+    /* LCOV_EXCL_START */
     if (context->secret != NULL) {
-        crypto_generichash_blake2b_update(&BlakeHash, (const uint8_t *)context->secret,
-                       context->secretlen);
+        crypto_generichash_blake2b_update(
+            &BlakeHash, (const uint8_t *) context->secret, context->secretlen);
 
         if (context->flags & ARGON2_FLAG_CLEAR_SECRET) {
             sodium_memzero(context->secret, context->secretlen);
             context->secretlen = 0;
         }
     }
+    /* LCOV_EXCL_STOP */
 
-    store32(&value, context->adlen);
-    crypto_generichash_blake2b_update(&BlakeHash, (const uint8_t *)&value, sizeof(value));
+    STORE32_LE(value, context->adlen);
+    crypto_generichash_blake2b_update(&BlakeHash, value, sizeof(value));
 
+    /* LCOV_EXCL_START */
     if (context->ad != NULL) {
-        crypto_generichash_blake2b_update(&BlakeHash, (const uint8_t *)context->ad,
-                                          context->adlen);
+        crypto_generichash_blake2b_update(
+            &BlakeHash, (const uint8_t *) context->ad, context->adlen);
     }
+    /* LCOV_EXCL_STOP */
 
-    crypto_generichash_blake2b_final(&BlakeHash, blockhash, ARGON2_PREHASH_DIGEST_LENGTH);
+    crypto_generichash_blake2b_final(&BlakeHash, blockhash,
+                                     ARGON2_PREHASH_DIGEST_LENGTH);
 }
 
-int initialize(argon2_instance_t *instance, argon2_context *context) {
+int
+initialize(argon2_instance_t *instance, argon2_context *context)
+{
     uint8_t blockhash[ARGON2_PREHASH_SEED_LENGTH];
-    int result = ARGON2_OK;
+    int     result = ARGON2_OK;
 
-    if (instance == NULL || context == NULL)
+    if (instance == NULL || context == NULL) {
         return ARGON2_INCORRECT_PARAMETER;
+    }
 
     /* 1. Memory allocation */
 
+    if ((instance->pseudo_rands = (uint64_t *)
+         malloc(sizeof(uint64_t) * instance->segment_length)) == NULL) {
+        return ARGON2_MEMORY_ALLOCATION_ERROR;
+    }
+
     result = allocate_memory(&(instance->region), instance->memory_blocks);
     if (ARGON2_OK != result) {
+        free_instance(instance, context->flags);
         return result;
     }
 
@@ -544,10 +512,25 @@ int initialize(argon2_instance_t *instance, argon2_context *context) {
     return ARGON2_OK;
 }
 
-int argon2_pick_best_implementation(void)
+int
+argon2_pick_best_implementation(void)
 {
-#if (defined(HAVE_EMMINTRIN_H) && defined(HAVE_TMMINTRIN_H)) || \
-    (defined(_MSC_VER) && (defined(_M_X64) || defined(_M_AMD64)))
+/* LCOV_EXCL_START */
+#if defined(HAVE_AVX512FINTRIN_H) && defined(HAVE_AVX2INTRIN_H) && \
+    defined(HAVE_TMMINTRIN_H) && defined(HAVE_SMMINTRIN_H)
+    if (sodium_runtime_has_avx512f()) {
+        fill_segment = fill_segment_avx512f;
+        return 0;
+    }
+#endif
+#if defined(HAVE_AVX2INTRIN_H) && defined(HAVE_TMMINTRIN_H) && \
+    defined(HAVE_SMMINTRIN_H)
+    if (sodium_runtime_has_avx2()) {
+        fill_segment = fill_segment_avx2;
+        return 0;
+    }
+#endif
+#if defined(HAVE_EMMINTRIN_H) && defined(HAVE_TMMINTRIN_H)
     if (sodium_runtime_has_ssse3()) {
         fill_segment = fill_segment_ssse3;
         return 0;
@@ -556,4 +539,11 @@ int argon2_pick_best_implementation(void)
     fill_segment = fill_segment_ref;
 
     return 0;
+    /* LCOV_EXCL_STOP */
+}
+
+int
+_crypto_pwhash_argon2_pick_best_implementation(void)
+{
+    return argon2_pick_best_implementation();
 }
