@@ -2,7 +2,13 @@
 #ifndef __CMPTEST_H__
 #define __CMPTEST_H__
 
+#ifdef NDEBUG
+#/**/undef/**/ NDEBUG
+#endif
+
 #include <assert.h>
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -29,9 +35,59 @@
 
 int xmain(void);
 
-#ifndef BROWSER_TESTS
+#ifdef BENCHMARKS
 
-FILE *fp_res;
+# include <sys/time.h>
+
+# ifndef ITERATIONS
+#  define ITERATIONS 128
+# endif
+
+static unsigned long long now(void)
+{
+    struct             timeval tp;
+    unsigned long long now;
+
+    if (gettimeofday(&tp, NULL) != 0) {
+        abort();
+    }
+    now = ((unsigned long long) tp.tv_sec * 1000000ULL) +
+        (unsigned long long) tp.tv_usec;
+
+    return now;
+}
+
+int main(void)
+{
+    unsigned long long ts_start;
+    unsigned long long ts_end;
+    unsigned int       i;
+
+    if (sodium_init() != 0) {
+        return 99;
+    }
+
+#ifndef __EMSCRIPTEN__
+    randombytes_set_implementation(&randombytes_salsa20_implementation);
+#endif
+    ts_start = now();
+    for (i = 0; i < ITERATIONS; i++) {
+        if (xmain() != 0) {
+            abort();
+        }
+    }
+    ts_end = now();
+    printf("%llu\n", 1000000ULL * (ts_end - ts_start) / ITERATIONS);
+
+    return 0;
+}
+
+#undef  printf
+#define printf(...) do { } while(0)
+
+#elif !defined(BROWSER_TESTS)
+
+static FILE *fp_res;
 
 int main(void)
 {
